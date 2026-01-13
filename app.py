@@ -6,7 +6,7 @@ import streamlit as st
 from io import BytesIO
 
 
-def extract_main_text(url: str, timeout=20) -> str:
+def extract_full_text(url: str, timeout=20) -> str:
     try:
         headers = {
             "User-Agent": (
@@ -15,36 +15,50 @@ def extract_main_text(url: str, timeout=20) -> str:
                 "Chrome/120.0 Safari/537.36"
             )
         }
+
         r = requests.get(url, headers=headers, timeout=timeout)
         r.raise_for_status()
 
         soup = BeautifulSoup(r.text, "lxml")
-        main_tag = soup.find("main")
 
-        if not main_tag:
-            return "ERROR: <main> tag not found"
-
-        for tag in main_tag(["script", "style", "noscript"]):
+        # удаляем мусор со всей страницы
+        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
             tag.decompose()
 
-        text = main_tag.get_text(separator=" ", strip=True)
+        text = soup.get_text(separator=" ", strip=True)
         text = " ".join(text.split())
+
+        if not text:
+            return "ERROR: empty text"
+
         return text
 
     except Exception as e:
         return f"ERROR: {str(e)}"
 
 
-st.set_page_config(page_title="URL → <main> text → Excel", layout="centered")
-st.title("Парсер URL из Excel (только <main>)")
+st.set_page_config(page_title="URL → full text → Excel", layout="centered")
+st.title("Парсер URL из Excel (весь текст страницы)")
 
-uploaded_file = st.file_uploader("Загрузи XLS/XLSX файл (URL в первом столбце)", type=["xls", "xlsx"])
+uploaded_file = st.file_uploader(
+    "Загрузи XLS/XLSX файл (URL в первом столбце)",
+    type=["xls", "xlsx"]
+)
 
 delay = st.slider("Пауза между запросами (сек)", 0.0, 5.0, 1.0, 0.5)
 
 if uploaded_file is not None:
     df = pd.read_excel(uploaded_file, header=None)
+
+    if df.shape[1] == 0:
+        st.error("Файл пустой или не удалось прочитать первый столбец.")
+        st.stop()
+
     urls = df.iloc[:, 0].dropna().astype(str).tolist()
+
+    if not urls:
+        st.warning("В первом столбце не найдено URL.")
+        st.stop()
 
     st.write(f"Найдено URL: **{len(urls)}**")
 
@@ -55,13 +69,16 @@ if uploaded_file is not None:
 
         for i, url in enumerate(urls, start=1):
             status.write(f"Парсим {i}/{len(urls)}: {url}")
-            text = extract_main_text(url)
+            text = extract_full_text(url)
             results.append(text)
 
             progress.progress(i / len(urls))
             time.sleep(delay)
 
-        out_df = pd.DataFrame({"URL": urls, "MAIN_TEXT": results})
+        out_df = pd.DataFrame({
+            "URL": urls,
+            "TEXT": results
+        })
 
         buffer = BytesIO()
         out_df.to_excel(buffer, index=False)
