@@ -1,16 +1,42 @@
-import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+import re
 import time
-import streamlit as st
 from io import BytesIO
 
+import pandas as pd
+import requests
+import streamlit as st
+from bs4 import BeautifulSoup
 
-def extract_full_text(url: str, timeout=20) -> str:
+
+def clean_text(text: str) -> str:
+    # нормализуем пробелы
+    text = " ".join(text.split())
+
+    # вырезаем большие JSON-похожие куски: [{...}] или {...}
+    # (особенно когда там lid/li_type/li_ph и прочее)
+    text = re.sub(r"\[\{.*?\}\]", " ", text, flags=re.DOTALL)
+    text = re.sub(r"\{.*?\}", " ", text, flags=re.DOTALL)
+
+    # убираем юникод-экранирование типа \u0418\u043c\u044f
+    text = re.sub(r"\\u[0-9a-fA-F]{4}", " ", text)
+
+    # убираем мусорные “технические” слова (можно расширять)
+    bad_patterns = [
+        r"\blid\b", r"\bli_type\b", r"\bli_ph\b", r"\bli_req\b", r"\bli_nm\b",
+        r"\bloff\b", r"\bls\b", r"\bli_name\b", r"\bli_label\b"
+    ]
+    text = re.sub("|".join(bad_patterns), " ", text, flags=re.IGNORECASE)
+
+    # снова чистим пробелы
+    text = " ".join(text.split()).strip()
+    return text
+
+
+def extract_content_text(url: str, timeout=25) -> str:
     try:
         headers = {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0 Safari/537.36"
             )
@@ -21,15 +47,26 @@ def extract_full_text(url: str, timeout=20) -> str:
 
         soup = BeautifulSoup(r.text, "lxml")
 
-        # удаляем мусор со всей страницы
-        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
+        # ❌ удаляем мусорные теги (они часто содержат много “кода”)
+        for tag in soup([
+            "script", "style", "noscript", "template",
+            "svg", "canvas", "iframe", "form",
+            "header", "footer", "nav", "aside"
+        ]):
             tag.decompose()
 
-        text = soup.get_text(separator=" ", strip=True)
-        text = " ".join(text.split())
+        # берём только body (контент страницы)
+        body = soup.body if soup.body else soup
 
-        if not text:
-            return "ERROR: empty text"
+        # иногда мусор лежит в элементах type="application/json"
+        for tag in body.find_all(attrs={"type": "application/json"}):
+            tag.decompose()
+
+        text = body.get_text(separator=" ", strip=True)
+        text = clean_text(text)
+
+        if not text or len(text) < 30:
+            return "ERROR: пустой или слишком короткий текст (возможно сайт грузится через JS)"
 
         return text
 
@@ -37,8 +74,8 @@ def extract_full_text(url: str, timeout=20) -> str:
         return f"ERROR: {str(e)}"
 
 
-st.set_page_config(page_title="URL → full text → Excel", layout="centered")
-st.title("Парсер URL из Excel (весь текст страницы)")
+st.set_page_config(page_title="URL → контент → Excel", layout="centered")
+st.title("Парсер URL из Excel (только контент, без кода/JSON)")
 
 uploaded_file = st.file_uploader(
     "Загрузи XLS/XLSX файл (URL в первом столбце)",
@@ -69,7 +106,7 @@ if uploaded_file is not None:
 
         for i, url in enumerate(urls, start=1):
             status.write(f"Парсим {i}/{len(urls)}: {url}")
-            text = extract_full_text(url)
+            text = extract_content_text(url)
             results.append(text)
 
             progress.progress(i / len(urls))
