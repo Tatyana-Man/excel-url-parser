@@ -29,6 +29,11 @@ def clean_text(text: str) -> str:
     return text
 
 
+def safe_join(parts, sep=" | "):
+    parts = [p.strip() for p in parts if p and str(p).strip()]
+    return sep.join(parts)
+
+
 def get_title(soup: BeautifulSoup) -> str:
     if soup.title and soup.title.get_text(strip=True):
         return soup.title.get_text(strip=True)
@@ -36,12 +41,10 @@ def get_title(soup: BeautifulSoup) -> str:
 
 
 def get_description(soup: BeautifulSoup) -> str:
-    # обычный meta description
     tag = soup.find("meta", attrs={"name": "description"})
     if tag and tag.get("content"):
         return tag.get("content").strip()
 
-    # og:description (часто на сайтах)
     tag = soup.find("meta", attrs={"property": "og:description"})
     if tag and tag.get("content"):
         return tag.get("content").strip()
@@ -97,11 +100,14 @@ def extract_page_data(url: str, timeout=25) -> dict:
         if not text or len(text) < 30:
             text = "ERROR: пустой или слишком короткий текст (возможно сайт грузится через JS)"
 
+        full_text = safe_join([title, description, h1, text], sep=" | ")
+
         return {
             "TITLE": title,
             "DESCRIPTION": description,
             "H1": h1,
-            "TEXT": text
+            "TEXT": text,
+            "FULL_TEXT": full_text
         }
 
     except Exception as e:
@@ -109,12 +115,13 @@ def extract_page_data(url: str, timeout=25) -> dict:
             "TITLE": "",
             "DESCRIPTION": "",
             "H1": "",
-            "TEXT": f"ERROR: {str(e)}"
+            "TEXT": f"ERROR: {str(e)}",
+            "FULL_TEXT": f"ERROR: {str(e)}"
         }
 
 
 st.set_page_config(page_title="URL → Title/Desc/H1/Text → Excel", layout="centered")
-st.title("Парсер URL из Excel (тайтл + дескрипшен + h1 + текст)")
+st.title("Парсер URL из Excel (тайтл + дескрипшен + h1 + текст + объединение)")
 
 uploaded_file = st.file_uploader(
     "Загрузи XLS/XLSX файл (URL в первом столбце)",
@@ -152,7 +159,8 @@ if uploaded_file is not None:
                 "TITLE": data["TITLE"],
                 "DESCRIPTION": data["DESCRIPTION"],
                 "H1": data["H1"],
-                "TEXT": data["TEXT"]
+                "TEXT": data["TEXT"],
+                "FULL_TEXT": data["FULL_TEXT"]
             })
 
             progress.progress(i / len(urls))
