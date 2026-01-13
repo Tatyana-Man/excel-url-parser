@@ -9,30 +9,56 @@ from bs4 import BeautifulSoup
 
 
 def clean_text(text: str) -> str:
-    # нормализуем пробелы
     text = " ".join(text.split())
 
     # вырезаем большие JSON-похожие куски: [{...}] или {...}
-    # (особенно когда там lid/li_type/li_ph и прочее)
     text = re.sub(r"\[\{.*?\}\]", " ", text, flags=re.DOTALL)
     text = re.sub(r"\{.*?\}", " ", text, flags=re.DOTALL)
 
     # убираем юникод-экранирование типа \u0418\u043c\u044f
     text = re.sub(r"\\u[0-9a-fA-F]{4}", " ", text)
 
-    # убираем мусорные “технические” слова (можно расширять)
+    # убираем тех. ключи, которые часто встречаются в мусорном JSON
     bad_patterns = [
         r"\blid\b", r"\bli_type\b", r"\bli_ph\b", r"\bli_req\b", r"\bli_nm\b",
         r"\bloff\b", r"\bls\b", r"\bli_name\b", r"\bli_label\b"
     ]
     text = re.sub("|".join(bad_patterns), " ", text, flags=re.IGNORECASE)
 
-    # снова чистим пробелы
     text = " ".join(text.split()).strip()
     return text
 
 
-def extract_content_text(url: str, timeout=25) -> str:
+def get_title(soup: BeautifulSoup) -> str:
+    if soup.title and soup.title.get_text(strip=True):
+        return soup.title.get_text(strip=True)
+    return ""
+
+
+def get_description(soup: BeautifulSoup) -> str:
+    # обычный meta description
+    tag = soup.find("meta", attrs={"name": "description"})
+    if tag and tag.get("content"):
+        return tag.get("content").strip()
+
+    # og:description (часто на сайтах)
+    tag = soup.find("meta", attrs={"property": "og:description"})
+    if tag and tag.get("content"):
+        return tag.get("content").strip()
+
+    return ""
+
+
+def get_h1(soup: BeautifulSoup) -> str:
+    h1 = soup.find("h1")
+    if h1:
+        txt = h1.get_text(separator=" ", strip=True)
+        txt = " ".join(txt.split()).strip()
+        return txt
+    return ""
+
+
+def extract_page_data(url: str, timeout=25) -> dict:
     try:
         headers = {
             "User-Agent": (
@@ -47,7 +73,11 @@ def extract_content_text(url: str, timeout=25) -> str:
 
         soup = BeautifulSoup(r.text, "lxml")
 
-        # ❌ удаляем мусорные теги (они часто содержат много “кода”)
+        title = get_title(soup)
+        description = get_description(soup)
+        h1 = get_h1(soup)
+
+        # ❌ удаляем мусорные теги
         for tag in soup([
             "script", "style", "noscript", "template",
             "svg", "canvas", "iframe", "form",
@@ -55,7 +85,6 @@ def extract_content_text(url: str, timeout=25) -> str:
         ]):
             tag.decompose()
 
-        # берём только body (контент страницы)
         body = soup.body if soup.body else soup
 
         # иногда мусор лежит в элементах type="application/json"
@@ -66,16 +95,26 @@ def extract_content_text(url: str, timeout=25) -> str:
         text = clean_text(text)
 
         if not text or len(text) < 30:
-            return "ERROR: пустой или слишком короткий текст (возможно сайт грузится через JS)"
+            text = "ERROR: пустой или слишком короткий текст (возможно сайт грузится через JS)"
 
-        return text
+        return {
+            "TITLE": title,
+            "DESCRIPTION": description,
+            "H1": h1,
+            "TEXT": text
+        }
 
     except Exception as e:
-        return f"ERROR: {str(e)}"
+        return {
+            "TITLE": "",
+            "DESCRIPTION": "",
+            "H1": "",
+            "TEXT": f"ERROR: {str(e)}"
+        }
 
 
-st.set_page_config(page_title="URL → контент → Excel", layout="centered")
-st.title("Парсер URL из Excel (только контент, без кода/JSON)")
+st.set_page_config(page_title="URL → Title/Desc/H1/Text → Excel", layout="centered")
+st.title("Парсер URL из Excel (тайтл + дескрипшен + h1 + текст)")
 
 uploaded_file = st.file_uploader(
     "Загрузи XLS/XLSX файл (URL в первом столбце)",
@@ -100,22 +139,26 @@ if uploaded_file is not None:
     st.write(f"Найдено URL: **{len(urls)}**")
 
     if st.button("Start"):
-        results = []
+        rows = []
         progress = st.progress(0)
         status = st.empty()
 
         for i, url in enumerate(urls, start=1):
             status.write(f"Парсим {i}/{len(urls)}: {url}")
-            text = extract_content_text(url)
-            results.append(text)
+
+            data = extract_page_data(url)
+            rows.append({
+                "URL": url,
+                "TITLE": data["TITLE"],
+                "DESCRIPTION": data["DESCRIPTION"],
+                "H1": data["H1"],
+                "TEXT": data["TEXT"]
+            })
 
             progress.progress(i / len(urls))
             time.sleep(delay)
 
-        out_df = pd.DataFrame({
-            "URL": urls,
-            "TEXT": results
-        })
+        out_df = pd.DataFrame(rows)
 
         buffer = BytesIO()
         out_df.to_excel(buffer, index=False)
