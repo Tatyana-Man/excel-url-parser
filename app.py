@@ -30,7 +30,7 @@ def clean_text(text: str) -> str:
 
 
 def safe_join(parts, sep=" | "):
-    parts = [p.strip() for p in parts if p and str(p).strip()]
+    parts = [str(p).strip() for p in parts if p and str(p).strip()]
     return sep.join(parts)
 
 
@@ -56,9 +56,88 @@ def get_h1(soup: BeautifulSoup) -> str:
     h1 = soup.find("h1")
     if h1:
         txt = h1.get_text(separator=" ", strip=True)
-        txt = " ".join(txt.split()).strip()
-        return txt
+        return " ".join(txt.split()).strip()
     return ""
+
+
+def normalize_price_number(raw: str) -> str:
+    raw = raw.replace("\xa0", " ")
+    raw = raw.replace(",", " ")
+    raw = re.sub(r"[^\d ]", "", raw)
+    raw = raw.replace(" ", "")
+    return raw.strip()
+
+
+def find_prices_with_context(text: str, context_window: int = 60):
+    """
+    Возвращает:
+    - price_main: первое совпадение
+    - prices_found: список цен (строкой через ;)
+    - contexts: список "цена + контекст" (строкой через \n)
+    """
+    if not text:
+        return "", "", ""
+
+    t = text.replace("\xa0", " ")
+    t = " ".join(t.split())
+
+    patterns = [
+        # число + ₽/руб/RUB
+        r"(?<!\d)(\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,7})\s*(₽|руб\.?|р\.?|RUB)\b",
+        # ₽ + число
+        r"(₽)\s*(\d{1,3}(?:[ \u00a0]\d{3})+|\d{4,7})\b",
+        # число + (в месяц / мес) (даже без ₽)
+        r"(?<!\d)(\d{1,3}(?:[ \u00a0]\d{3})+|\d{3,7})\s*(?:₽|руб\.?|р\.?|RUB)?\s*/?\s*(?:мес\.?|в месяц|в мес)\b",
+    ]
+
+    matches = []
+
+    for p in patterns:
+        for m in re.finditer(p, t, flags=re.IGNORECASE):
+            match_text = m.group(0).strip()
+
+            # вытащим число для фильтра
+            groups = [g for g in m.groups() if g]
+            number_candidate = None
+            for g in groups:
+                if re.search(r"\d", g):
+                    number_candidate = g
+                    break
+
+            if number_candidate:
+                num = normalize_price_number(number_candidate)
+                if num.isdigit():
+                    value = int(num)
+                    if 100 <= value <= 2_000_000:
+                        start, end = m.span()
+
+                        # контекст вокруг цены
+                        left = max(0, start - context_window)
+                        right = min(len(t), end + context_window)
+                        context = t[left:right].strip()
+
+                        # делаем читаемо
+                        context = context.replace(match_text, f"👉 {match_text} 👈")
+
+                        matches.append((match_text, context))
+
+    # убираем дубли, сохраняя порядок
+    unique_prices = []
+    unique_contexts = []
+    seen = set()
+
+    for price, ctx in matches:
+        key = price.lower()
+        if key not in seen:
+            seen.add(key)
+            unique_prices.append(price)
+            unique_contexts.append(ctx)
+
+    price_main = unique_prices[0] if unique_prices else ""
+    prices_found = "; ".join(unique_prices)
+    price_contexts = "\n".join(unique_contexts)
+
+    return price_main, prices_found, price_contexts
 
 
 def extract_page_data(url: str, timeout=25) -> dict:
@@ -102,26 +181,35 @@ def extract_page_data(url: str, timeout=25) -> dict:
 
         full_text = safe_join([title, description, h1, text], sep=" | ")
 
+        price_main, prices_found, price_contexts = find_prices_with_context(full_text, context_window=70)
+
         return {
             "TITLE": title,
             "DESCRIPTION": description,
             "H1": h1,
             "TEXT": text,
-            "FULL_TEXT": full_text
+            "FULL_TEXT": full_text,
+            "PRICE_MAIN": price_main,
+            "PRICES_FOUND": prices_found,
+            "PRICE_CONTEXTS": price_contexts
         }
 
     except Exception as e:
+        err = f"ERROR: {str(e)}"
         return {
             "TITLE": "",
             "DESCRIPTION": "",
             "H1": "",
-            "TEXT": f"ERROR: {str(e)}",
-            "FULL_TEXT": f"ERROR: {str(e)}"
+            "TEXT": err,
+            "FULL_TEXT": err,
+            "PRICE_MAIN": "",
+            "PRICES_FOUND": "",
+            "PRICE_CONTEXTS": ""
         }
 
 
-st.set_page_config(page_title="URL → Title/Desc/H1/Text → Excel", layout="centered")
-st.title("Парсер URL из Excel (тайтл + дескрипшен + h1 + текст + объединение)")
+st.set_page_config(page_title="URL → контент + цены → Excel", layout="centered")
+st.title("Парсер URL из Excel (тайтл + дескрипшен + h1 + текст + цены с контекстом)")
 
 uploaded_file = st.file_uploader(
     "Загрузи XLS/XLSX файл (URL в первом столбце)",
@@ -160,7 +248,10 @@ if uploaded_file is not None:
                 "DESCRIPTION": data["DESCRIPTION"],
                 "H1": data["H1"],
                 "TEXT": data["TEXT"],
-                "FULL_TEXT": data["FULL_TEXT"]
+                "FULL_TEXT": data["FULL_TEXT"],
+                "PRICE_MAIN": data["PRICE_MAIN"],
+                "PRICES_FOUND": data["PRICES_FOUND"],
+                "PRICE_CONTEXTS": data["PRICE_CONTEXTS"],
             })
 
             progress.progress(i / len(urls))
